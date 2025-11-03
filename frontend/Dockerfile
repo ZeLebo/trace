@@ -16,6 +16,5 @@ RUN bun vite build
 FROM caddy:latest AS production
 
 COPY --from=builder /app/dist/ /usr/share/caddy/
-RUN chmod -R 555 /usr/share/caddy
 
 EXPOSE 80 443/tcp 443/udp
