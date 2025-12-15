@@ -31,12 +31,11 @@ systemctl reload caddy
 
 run
 
+term 1
+
 ```
 # pwd ./trace/
 docker compose -f docker-compose.development.yml up frontend -d
-cd ./fastapi/
-source env.sh
-sudo -E $(which uvicorn) main:app
 ```
 
 term 2
@@ -44,6 +43,14 @@ term 2
 # pwd ./fastapi/
 source env.sh
 python settrace.py
+```
+
+term 1
+
+```
+# pwd ./fastapi/
+source env.sh
+sudo -E $(which uvicorn) main:app
 ```
 
 <img src="scr1.png" alt="App screenshot"/>
