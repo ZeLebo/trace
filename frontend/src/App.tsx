@@ -46,17 +46,36 @@ async function syncFromServer() {
   // timeline
   setTimelineMessages(data.timeline);
 
-  if (data.current_timeline_id != null) {
-    const idx = data.timeline.findIndex(
-      (t: any) => t.id === data.current_timeline_id
-    );
+if (data.current_timeline_id != null) {
+  const idx = data.timeline.findIndex(
+    (t: any) => t.id === data.current_timeline_id
+  );
 
-    setCurrentMessageIndex(idx >= 0 ? idx : null);
-    setHighlightedId(data.current_timeline_id.toString());
+  if (idx >= 0) {
+    const lineno = data.timeline[idx].lineno;
+
+    setCurrentMessageIndex(idx);
+    setHighlightedId(lineno.toString());
+
+    // keep node.data.highlighted in sync (same logic as WS)
+    setNodes(nds =>
+      nds.map(node => {
+        const next = node.id === lineno.toString();
+        if (node.data.highlighted === next) return node;
+        return { ...node, data: { ...node.data, highlighted: next } };
+      })
+    );
   } else {
     setCurrentMessageIndex(null);
     setHighlightedId(null);
   }
+} else {
+  setCurrentMessageIndex(null);
+  setHighlightedId(null);
+}
+
+  
+
 }
 
 
@@ -118,7 +137,7 @@ async function syncFromServer() {
   );
 
 const handleTimelineClick = (index: number) => {
-  const msg = timelineMessages[index];
+  const msg = timelineMessages[index - 1];
   if (!msg) return;
 
   send(msg.id);              // ✅ authoritative
