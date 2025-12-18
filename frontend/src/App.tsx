@@ -2,221 +2,170 @@ import {
   Controls,
   ReactFlow,
   applyNodeChanges,
-  useStore
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useCallback, useState, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ImportPanel } from './ImportPanel';
 import CodeNode from './CodeNode';
-import { useWebSocket } from "./useWebSocket";
-import { WebSocketPanel } from "./WebSocketPanel";
 import { FlowHighlighter } from './FlowHighlighter';
-import { server_uri } from './config';
+import { RunnerPanel, RunnerState } from './RunnerPanel';
+import { TraceData, TimelineEntry, buildTraceFromSource } from './traceBuilder';
+import { ensurePyodide } from './pyRunner';
+import { OutputPanel } from './OutputPanel';
 
 export default function App() {
-  const { message, send } = useWebSocket(`ws${server_uri}/api/ws`);
-
-  const normalizeEvent = (event?: string) =>
-    event?.replace(/^"+|"+$/g, '') ?? '';
-
   const [nodes, setNodes] = useState<any[]>([]);
-  const [fileImported, setFileImported] = useState(true);
-  const [reachedEnd, setReachedEnd] = useState(false);
-
-  const [timelineClicked, setTimelineClicked] = useState<boolean | null>(null);
-
-  const [timelineMessages, setTimelineMessages] = useState<any[]>([]);
-  const [currentMessageIndex, setCurrentMessageIndex] = useState<number | null>(null);
-
-  const [waitingForResponse, setWaitingForResponse] = useState(false);
-
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [runnerState, setRunnerState] = useState<RunnerState>('idle');
+  const [currentMessageIndex, setCurrentMessageIndex] = useState<number>(-1);
+  const [fileName, setFileName] = useState<string>('');
+  const [sourceCode, setSourceCode] = useState<string>('');
+  const [outputLines, setOutputLines] = useState<string[]>([]);
+  const [pyLoading, setPyLoading] = useState(false);
+  const [pyError, setPyError] = useState<string | null>(null);
 
   const nodeTypes = useMemo(() => ({ code: CodeNode }), []);
 
+  // Seed with a tiny example so the UI is not empty.
   useEffect(() => {
-    syncFromServer();
-  }, []);
-
-  const timelineIndexByLine = useMemo(() => {
-  const map = new Map<string, number>();
-
-  timelineMessages.forEach((msg, idx) => {
-    if (msg.lineno != null) {
-      map.set(msg.lineno.toString(), idx);
-    }
-  });
-
-  return map;
-}, [timelineMessages]);
-
-
-  const handleTimelineClick = (index: number) => {
-    const msg = timelineMessages[index];
-    if (!msg) return;
-
-    send(msg.current_timeline_id);
-    setCurrentMessageIndex(index);
-    setTimelineClicked(true);
-  };
-
-
-  const onNodeClick = useCallback(
-  (_: any, node: any) => {
-    const idx = timelineIndexByLine.get(node.id);
-    if (idx == null) return;
-
-    handleTimelineClick(idx);
-  },
-  [timelineIndexByLine, handleTimelineClick]
-);
-
-
-  async function syncFromServer() {
-    const res = await fetch(`http${server_uri}/api/sync`);
-    const data = await res.json();
-
-    setNodes(data.nodes);
-    setTimelineMessages(data.timeline);
-
-    if (data.current_timeline_id != null) {
-      const idx = data.timeline.findIndex(
-        (t: any) => t.current_timeline_id === data.current_timeline_id
-      );
-
-      if (idx >= 0) {
-        const lineno = data.timeline[idx].lineno;
-
-        setCurrentMessageIndex(idx);
-        setHighlightedId(lineno.toString());
-
-        setNodes(nds =>
-          nds.map(node => {
-            const next = node.id === lineno.toString();
-            if (node.data.highlighted === next) return node;
-            return { ...node, data: { ...node.data, highlighted: next } };
-          })
-        );
-      } else {
-        setCurrentMessageIndex(null);
-        setHighlightedId(null);
-      }
-    } else {
-      setCurrentMessageIndex(null);
-      setHighlightedId(null);
-    }
-  }
-
-  const wipeTimeline = useCallback(() => {
-    setTimelineMessages([]);
-    setCurrentMessageIndex(null);
-  }, []);
-
-  // 🔑 MAP lineno → frame_pointer
-  const frameByLine = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const msg of timelineMessages) {
-      if (msg.lineno && msg.frame_pointer) {
-        map.set(msg.lineno.toString(), msg.frame_pointer);
-      }
-    }
-    return map;
-  }, [timelineMessages]);
-
-  // 🔑 INJECT framePointer into nodes
-  useEffect(() => {
-    setNodes(nds =>
-      nds.map(node => {
-        const framePointer = frameByLine.get(node.id) ?? null;
-        if (node.data.framePointer === framePointer) return node;
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            framePointer,
-          },
-        };
-      })
+    const demo = buildTraceFromSource(
+      [
+        'def greet(name):',
+        '    print(f\"hello, {name}\")',
+        '',
+        'greet(\"trace\")',
+      ].join('\n'),
+      'example.py'
     );
-  }, [frameByLine]);
+    setNodes(demo.nodes);
+    setTimeline(demo.timeline);
+    setFileName(demo.fileName ?? '');
+    setSourceCode(demo.source);
+  }, []);
 
-  // WebSocket Handler
+  const resetHighlights = useCallback(() => {
+    setNodes(nds =>
+      nds.map(node => ({
+        ...node,
+        data: { ...node.data, highlighted: false },
+      }))
+    );
+    setHighlightedId(null);
+  }, []);
+
+  const handleImport = useCallback((data: TraceData) => {
+    setNodes(data.nodes);
+    setTimeline(data.timeline);
+    setFileName(data.fileName ?? '');
+    setSourceCode(data.source);
+    setRunnerState('idle');
+    setCurrentMessageIndex(-1);
+    setHighlightedId(null);
+    setOutputLines([]);
+    setPyError(null);
+  }, []);
+
+  const advanceStep = useCallback(() => {
+    setCurrentMessageIndex(prev => {
+      const next = prev + 1;
+      if (next >= timeline.length) {
+        setRunnerState('finished');
+        return Math.min(prev, timeline.length - 1);
+      }
+      return next;
+    });
+  }, [timeline.length]);
+
   useEffect(() => {
-    if (!message) return;
+    if (runnerState !== 'playing') return;
+    if (!timeline.length) return;
 
-    setWaitingForResponse(false);
+    // Prime the first step when we start from idle.
+    if (currentMessageIndex < 0) {
+      setCurrentMessageIndex(0);
+    }
 
-    console.info(message)
+    const interval = setInterval(advanceStep, 480);
+    return () => clearInterval(interval);
+  }, [runnerState, timeline.length, currentMessageIndex, advanceStep]);
 
-    if (message === 'x') {
-      console.log('app died');
-      setReachedEnd(true);
-      setHighlightedId(null);
-      setCurrentMessageIndex(null);
+  useEffect(() => {
+    if (currentMessageIndex < 0 || currentMessageIndex >= timeline.length) {
+      resetHighlights();
       return;
     }
 
-    setReachedEnd(false);
+    const lineno = timeline[currentMessageIndex].lineno.toString();
+    setHighlightedId(lineno);
 
-    try {
-      const evt = JSON.parse(message);
-      const id = evt.lineno.toString();
-
-      setHighlightedId(id);
-
-      setNodes(nds =>
-        nds.map(node => {
-          const old = node.data.highlighted;
-          const next = node.id === id;
-          if (old === next) return node;
-          return { ...node, data: { ...node.data, highlighted: next } };
-        })
-      );
-
-      if (!timelineClicked) {
-        setTimelineMessages(prev => {
-          const id = evt.current_timeline_id;
-          const idx = prev.findIndex(
-            m => m.current_timeline_id === id
-          );
-
-          let next: any[];
-
-          if (idx >= 0) {
-            next = [...prev];
-            next[idx] = { ...prev[idx], ...evt };
-            setCurrentMessageIndex(idx);
-          } else {
-            next = [...prev, evt];
-            if (next.length > 500) next.shift();
-            setCurrentMessageIndex(next.length - 1);
-          }
-
-          return next;
-        });
-      } else {
-        setTimelineClicked(null);
-      }
-
-    } catch (err) {
-      console.error('Failed to parse WS message', err);
-    }
-  }, [message]);
+    setNodes(nds =>
+      nds.map(node => ({
+        ...node,
+        data: { ...node.data, highlighted: node.id === lineno },
+      }))
+    );
+  }, [currentMessageIndex, timeline, resetHighlights]);
 
   const onNodesChange = useCallback(
-    (changes) => setNodes((snap) => applyNodeChanges(changes, snap)),
+    changes => setNodes(snap => applyNodeChanges(changes, snap)),
     []
   );
 
+  const runPython = useCallback(async () => {
+    if (!sourceCode) return;
+    setPyLoading(true);
+    setPyError(null);
+    setOutputLines([]);
+
+    try {
+      const py = await ensurePyodide();
+      py.setStdout({
+        batched: (text: string) =>
+          setOutputLines(prev => [...prev, text]),
+      });
+      py.setStderr({
+        batched: (text: string) =>
+          setOutputLines(prev => [...prev, text]),
+      });
+      await py.runPythonAsync(sourceCode);
+    } catch (err: any) {
+      console.error(err);
+      setPyError('Ошибка выполнения Python');
+      setOutputLines(prev => [...prev, String(err)]);
+    } finally {
+      setPyLoading(false);
+    }
+  }, [sourceCode]);
+
+  const handleStart = () => {
+    if (!timeline.length) return;
+    setRunnerState('playing');
+    if (currentMessageIndex < 0) setCurrentMessageIndex(0);
+    runPython();
+  };
+
+  const handlePause = () => setRunnerState('paused');
+
+  const handleResume = () => {
+    if (!timeline.length) return;
+    setRunnerState('playing');
+  };
+
+  const handleRestart = () => {
+    if (!timeline.length) return;
+    setRunnerState('playing');
+    setCurrentMessageIndex(0);
+    runPython();
+  };
+
   return (
     <div className="w-screen h-screen relative overflow-hidden flex flex-col">
-
-      {/* ---------------- BEAUTIFUL BACKGROUND RESTORED ---------------- */}
       <div
         className="stage fixed inset-0 pointer-events-none"
         style={{
           filter:
-            "blur(var(--blur)) brightness(calc(1 + (var(--intensity,1) - 1) * 0.25))",
+            'blur(var(--blur)) brightness(calc(1 + (var(--intensity,1) - 1) * 0.25))',
         }}
       >
         <div className="blob b1"></div>
@@ -280,13 +229,11 @@ export default function App() {
         }
       `}</style>
 
-      {/* ------------------- REACT FLOW ------------------- */}
       <div className="flex-1 w-full relative z-20">
         <ReactFlow
           nodes={nodes}
           nodeTypes={nodeTypes}
           onNodesChange={onNodesChange}
-          onNodeClick={onNodeClick}
           fitView
           panOnScroll
           proOptions={{ hideAttribution: true }}
@@ -297,15 +244,15 @@ export default function App() {
         >
           <FlowHighlighter highlightedId={highlightedId} />
 
-          <ImportPanel setNodes={setNodes} setFileImported={setFileImported} />
+          <ImportPanel onImport={handleImport} />
 
-          <WebSocketPanel
-            send={send}
-            reachedEnd={reachedEnd}
-            show={fileImported}
-            waiting={waitingForResponse}
-            setWaiting={setWaitingForResponse}
-            wipeTimeline={wipeTimeline}
+          <RunnerPanel
+            state={runnerState}
+            hasTimeline={timeline.length > 0}
+            onStart={handleStart}
+            onPause={handlePause}
+            onResume={handleResume}
+            onRestart={handleRestart}
           />
 
           <Controls />
@@ -313,33 +260,34 @@ export default function App() {
       </div>
 
       <div className="w-full h-16 flex items-center px-4 overflow-x-auto z-20 bg-[#292C33]">
-        {timelineMessages.map((msg, idx) => {
+        <div className="text-white text-xs mr-4 opacity-70">
+          {fileName || 'Нет файла'}
+        </div>
+        {timeline.map((msg, idx) => {
           const isSelected = currentMessageIndex === idx;
 
           return (
             <div
               key={idx}
-              onClick={() => handleTimelineClick(idx)}
-              className={`flex flex-col items-center flex-none w-8 mx-1 cursor-pointer transition-all duration-300
+              className={`flex flex-col items-center flex-none w-8 mx-1 transition-all duration-300
                 ${
                   isSelected
                     ? 'bg-yellow-400 border-yellow-600'
                     : 'bg-gray-400/50 border-gray-600'
                 }
                 rounded-full border-2 h-8`}
-              title={`Timeline index: ${idx}, Line: ${msg.lineno}`}
+              title={`Шаг ${idx + 1}, строка ${msg.lineno}`}
+              style={{ pointerEvents: 'none' }}
             >
               <span className="text-xs text-white mt-1 font-bold">
-                {(() => {
-                  const event = normalizeEvent(msg.event);
-                  if (event === 'line') return msg.lineno;
-                  return event.charAt(0).toUpperCase();
-                })()}
+                {msg.lineno}
               </span>
             </div>
           );
         })}
       </div>
+
+      <OutputPanel lines={outputLines} loading={pyLoading} error={pyError} />
     </div>
   );
 }

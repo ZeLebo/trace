@@ -1,5 +1,6 @@
-// ui/PanelButton.tsx
-export function PanelButton(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+import type { ButtonHTMLAttributes } from 'react';
+
+export function PanelButton(props: ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
       {...props}

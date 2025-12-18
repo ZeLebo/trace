@@ -1,6 +1,0 @@
-env/
-**/__pycache__/
-**/*.trace.txt
-criu_dumps/
-shared/*
-!shared/.empty

@@ -1,56 +1,23 @@
-install
+Trace (Programming Language)
 
-```
-# pwd ./trace/
-cd ./fastapi/
-source env.sh
-git clone https://github.com/herheliuk/criu-python-api ./criu-python-api/ --depth 1
-source ./criu-python-api/install.sh
-```
+Trace is a small visual runner for Python snippets. Paste or import a `.py` file and watch every executable line stream through a timeline with a centered highlight in the graph.
 
-```
-nano /etc/caddy/Caddyfile
-systemctl reload caddy
-```
+The stack is now **fully client-side**: no FastAPI backend, sockets, or CRIU—just React, Vite, and plain file parsing in the browser.
 
-```
-:4444 {
-        @api {
-                path /api/*
-        }
+## Quick start
 
-        handle @api {
-                reverse_proxy localhost:8000
-        }
-
-        handle {
-                reverse_proxy localhost:8080
-        }
-}
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
-run
+Open the printed URL, drop in a `.py` file, and hit "Запустить". The runner goes only forward in time: pause/resume or restart, but no rewinds.
 
-term 1
+To build a static bundle:
 
-```
-# pwd ./trace/
-docker compose -f docker-compose.development.yml up frontend -d
-```
-
-term 2
-```
-# pwd ./fastapi/
-source env.sh
-python settrace.py
-```
-
-term 1
-
-```
-# pwd ./fastapi/
-source env.sh
-sudo -E $(which uvicorn) main:app
+```bash
+npm run build
 ```
 
 <img src="scr1.png" alt="App screenshot"/>
